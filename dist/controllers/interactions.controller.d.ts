@@ -1,0 +1,2 @@
+export declare const createInteraction: import("express").RequestHandler<import("express-serve-static-core").ParamsDictionary, any, any, import("qs").ParsedQs, Record<string, any>>;
+//# sourceMappingURL=interactions.controller.d.ts.map

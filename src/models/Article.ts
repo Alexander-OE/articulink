@@ -5,6 +5,7 @@ export interface IArticle extends Document {
   content: string;
   author: string;
   summary?: string;
+  tags: string[];
   createdAt: Date;
   updatedAt: Date;
 }
@@ -15,10 +16,12 @@ const ArticleSchema: Schema = new Schema(
     content: { type: String, required: true },
     author: { type: String, required: true },
     summary: { type: String, default: "" },
+    tags: { type: [String], default: [], index: true },
   },
   { timestamps: true }
 );
 
-ArticleSchema.index({ title: "text", content: "text" });
+// Full-text index powering GET /articles/search
+ArticleSchema.index({ title: "text", content: "text", tags: "text" });
 
 export default mongoose.model<IArticle>("Article", ArticleSchema);

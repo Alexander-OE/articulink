@@ -1,7 +1,7 @@
 import Joi from 'joi';
 
 
-export const createUserSchema = Joi.object({
-username: Joi.string().alphanum().min(3).max(30).required(),
-interests: Joi.array().items(Joi.string()).optional(),
+export const listQuerySchema = Joi.object({
+limit: Joi.number().integer().min(1).max(100).default(10),
+offset: Joi.number().integer().min(0).default(0),
 });

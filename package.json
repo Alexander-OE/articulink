@@ -5,6 +5,8 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
+    "build": "tsc",
+    "start": "node dist/app.js",
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "nodemon --watch src --ext ts,json --ignore dist --exec \"node --loader ts-node/esm --experimental-specifier-resolution=node ./src/app.ts\"",
     "seed": "node --loader ts-node/esm --experimental-specifier-resolution=node ./src/seed/seed.ts",

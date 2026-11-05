@@ -1,260 +1,465 @@
-# Articulink
-### Smart Content Aggregator (Backend)
+# Articulink: Smart Content Aggregator (Backend)
 
-Articulink is a REST backend for publishing and discovering articles. Articles get an AI-generated summary and topical tags (via Google Gemini, with offline fallbacks). Users record engagement (views, likes, shares), and the API turns that into **search**, **trending** rankings, per-article **stats** and **personalized recommendations**.
+Articulink is a REST API (a web service that other programs talk to over HTTP) for publishing and discovering articles. It writes a summary and topic tags for each new article using Google Gemini AI. It then uses what readers do (views, likes, shares) to rank **trending** articles and to give each reader **personalized recommendations**.
+
+A separate frontend app (built in its own project, not in this repo) consumes this API.
 
 ---
 
 ## Table of Contents
 
-1. [Overview](#1-overview)
-2. [Tech Stack](#2-tech-stack)
-3. [Getting Started](#3-getting-started)
-4. [Project Structure](#4-project-structure)
-5. [Data Models](#5-data-models)
-6. [API Reference](#6-api-reference)
-7. [Authentication and Authorization](#7-authentication-and-authorization)
-8. [Error Handling](#8-error-handling)
-9. [Utilities and Special Logic](#9-utilities-and-special-logic)
-10. [API Documentation (Swagger)](#10-api-documentation-swagger)
-11. [Notes for Frontend Development](#11-notes-for-frontend-development)
-12. [Known Gaps and Suggestions](#12-known-gaps-and-suggestions)
+1. [What problem does it solve?](#1-what-problem-does-it-solve)
+2. [Key features](#2-key-features)
+3. [Tech stack](#3-tech-stack)
+4. [How it works](#4-how-it-works)
+5. [Project structure](#5-project-structure)
+6. [Getting started](#6-getting-started)
+7. [Environment variables](#7-environment-variables)
+8. [Authentication](#8-authentication)
+9. [Data models](#9-data-models)
+10. [API reference](#10-api-reference)
+11. [Error handling](#11-error-handling)
+12. [Deployment](#12-deployment)
+13. [Known limitations and ideas for improvement](#13-known-limitations-and-ideas-for-improvement)
 
 ---
 
-## 1. Overview
+## 1. What problem does it solve?
 
-**Problem it solves.** Content libraries get hard to navigate as they grow: articles arrive without summaries or tags, and readers have no signal for what's worth reading. Articulink fills in the metadata automatically and uses reader behaviour to surface relevant and popular content.
+When a content library grows, it gets hard to browse. Articles often have no summary or tags, and readers get no hint about what is worth reading.
 
-**Who it's for.** Anyone building a reader-facing content product (a news/blog aggregator, a knowledge base, a curated reading app). This repo is the backend; a frontend UI is planned next.
+Articulink fixes both:
 
-**Core features**
+- It **fills in the missing summary and tags automatically**.
+- It **learns from reader behaviour** to show what is popular and what suits each person.
 
-- **Articles**: create, fetch by id, paginated list (optionally filtered by tag).
-- **AI summary and tags**: if the client omits `summary` and/or `tags` on create, they are generated with Gemini. If there's no API key or the call fails, simple fallbacks are used, so creating an article never fails because of AI.
+With the API, a user can:
+
+- create an account and sign in;
+- publish articles;
+- browse, filter by tag, and search articles;
+- see trending articles and the stats for one article;
+- record a view, like or share;
+- get a personal list of recommended articles and a history of their recent activity.
+
+---
+
+## 2. Key features
+
+- **Accounts and sign-in.** Register with full name, email and password. Sign in to get a JWT (a signed token that proves who you are).
+- **Articles.** Create, fetch by id, and list with pagination (and an optional tag filter).
+- **AI summary and tags.** If you leave out `summary` or `tags` when creating an article, Gemini writes them. If there is no API key or the AI call fails, simple built-in fallbacks are used, so creating an article never fails because of the AI.
 - **Full-text search** over title, content and tags, ranked by relevance.
-- **Trending**: articles ranked by weighted engagement (share = 5, like = 3, view = 1) over a configurable number of days.
-- **Engagement stats** per article (views / likes / shares / total).
-- **Users**: register with a unique username and optional interests; fetch a user; view their 50 most recent interactions.
-- **Interactions**: record a `view`, `like` or `share` of an article by a user.
-- **Recommendations**: built from the user's interests plus the tags of articles they've engaged with, excluding already-seen articles; falls back to newest unseen articles.
-- **Operational**: Joi request validation, centralized error handler, `/health` probe, Swagger docs, `helmet` security headers, `morgan` request logging.
+- **Trending.** Articles ranked by weighted engagement over the last N days (share = 5 points, like = 3, view = 1).
+- **Interactions.** A signed-in user records a `view`, `like` or `share` on an article.
+- **Stats.** View, like and share counts for each article.
+- **Recommendations.** Built from the user's interests plus the tags of articles they have already engaged with. Articles they have already seen are left out.
+- **Activity.** A user's 50 most recent interactions.
+- **Extras.** Request validation (Joi), one central error handler, a `/health` check, Swagger docs at `/docs`, security headers (`helmet`), request logging (`morgan`), and a seed script that fills the database with demo data.
 
 ---
 
-## 2. Tech Stack
+## 3. Tech stack
 
-| Area | Technology | Used for |
-| --- | --- | --- |
-| Language / runtime | TypeScript 5.9, Node.js (ES modules, `"type": "module"`) | Application code |
-| Web framework | Express 5 | HTTP server and routing |
-| Database | MongoDB via Mongoose 8 | Persistence, text index, aggregation pipelines |
-| Validation | Joi 18 | Request body and query validation |
-| AI | `@google/generative-ai` (model `gemini-1.5-flash`) | Summary and tag generation |
-| Security / logging | `helmet`, `morgan` (`dev` format) | Security headers, request logging |
-| Config | `dotenv` | Loads `.env` |
-| API docs | `swagger-jsdoc`, `swagger-ui-express` | OpenAPI 3.0.3 spec and UI |
-| Dev tooling | `nodemon`, `ts-node` | Auto-reload dev server |
+| Technology | Why it is used |
+| --- | --- |
+| **TypeScript** (5.9) on **Node.js**, as ES modules | Typed JavaScript catches mistakes early. |
+| **Express 5** | Web framework: handles HTTP requests and routing. |
+| **MongoDB** with **Mongoose 8** | Database plus a schema layer. Gives us a text index (search) and aggregation (trending, stats). |
+| **Joi** | Checks that request bodies and query strings are valid. |
+| **jsonwebtoken** | Creates and verifies JWT sign-in tokens. |
+| **bcryptjs** | Hashes passwords so the real password is never stored. |
+| **@google/generative-ai** (model `gemini-1.5-flash`) | Generates article summaries and tags. |
+| **swagger-jsdoc** + **swagger-ui-express** | Builds the OpenAPI spec from code comments and serves the interactive docs. |
+| **helmet** | Adds standard security headers. |
+| **morgan** | Logs each request (`dev` format). |
+| **dotenv** | Loads settings from a `.env` file. |
+| **nodemon** + **ts-node** | Dev only: run TypeScript directly and reload on changes. |
 
-`axios` is listed as a dependency but is not imported anywhere in `src/`.
-
----
-
-## 3. Getting Started
-
-### Prerequisites
-
-- Node.js (recent version; the dev script uses the ts-node ESM loader, see [Known gaps](#12-known-gaps-and-suggestions))
-- npm
-- A running MongoDB instance (local or hosted)
-- Optional: a Google Gemini API key for AI summaries/tags
-
-### Installation
-
-```bash
-git clone https://github.com/Alexander-OE/articulink.git
-cd articulink
-npm install
-cp .env.example .env   # then fill in the values
-```
-
-### Environment variables
-
-From `.env.example`:
-
-| Variable | Required | Description |
-| --- | --- | --- |
-| `PORT` | No | Port the server listens on. If unset, the code defaults to **4000**. |
-| `MONGO_URI` | Yes | MongoDB connection string, e.g. `mongodb://localhost:27017/articulink`. If missing, the connection fails and the process exits with code 1. |
-| `GEMINI_API_KEY` | No | Enables Gemini summaries/tags. Without it, fallbacks are used. |
-
-### Scripts (`package.json`)
-
-| Script | Command | Notes |
-| --- | --- | --- |
-| `npm run dev` | `nodemon --watch src --ext ts,json --ignore dist --exec "node --loader ts-node/esm --experimental-specifier-resolution=node ./src/app.ts"` | Dev server with reload on changes in `src/`. |
-| `npm test` | placeholder | Prints "no test specified" and exits 1. There are no tests. |
-
-**There is no `build` or `start` script**, and `tsconfig.json` has `rootDir`/`outDir` commented out, so there is currently no defined build or production run command. Production would need a build step added (see [Known gaps](#12-known-gaps-and-suggestions)).
-
-Once running: `http://localhost:<PORT>/docs` for the Swagger UI.
+`axios` is listed in `package.json` but is not used anywhere in `src/`.
 
 ---
 
-## 4. Project Structure
+## 4. How it works
+
+The code is split into layers. A request passes through them in this order:
 
 ```
-articulink/
+Request -> route -> (requireAuth, if protected) -> controller -> Joi validation -> Mongoose model -> MongoDB
+                                                       |
+                                          errors go to the central error handler -> JSON error response
+```
+
+- **Routes** ([src/routes/](src/routes)) map a URL and method to a controller. They also hold the Swagger comments.
+- **Middleware** ([src/middleware/](src/middleware)) checks the token (`requireAuth`) and handles errors.
+- **Controllers** ([src/controllers/](src/controllers)) hold the logic for each endpoint.
+- **Models** ([src/models/](src/models)) describe what is stored in MongoDB.
+
+### Main flows
+
+**Register and sign in**
+1. `POST /auth/register` validates the input and hashes the password with bcrypt.
+2. It saves the user, then returns `{ token, user }`.
+3. Later, `POST /auth/login` checks the email and password and returns a new `{ token, user }`.
+
+**Calling a protected endpoint**
+1. The client sends `Authorization: Bearer <token>`.
+2. `requireAuth` verifies the token, loads the user from the database, and attaches it to the request.
+3. The controller uses that user. The client never says who it is in the body.
+
+**Create an article** (`POST /articles`)
+1. Check the token and validate the body.
+2. If `summary` is missing or blank, generate one. If `tags` is missing or empty, generate them. Both run at the same time.
+3. Save the article. Its `author` is set to the signed-in user's full name.
+
+**Interact with an article** (`POST /interactions`)
+1. Check the token and validate the body.
+2. Check that the article exists.
+3. Save an interaction for the signed-in user.
+
+**Trending, stats and recommendations** are calculated on request from the saved interactions. Nothing is cached.
+
+**Recommendations in detail.**
+1. Collect the articles the user has interacted with. These are "seen".
+2. Build a tag set from the user's `interests` plus the tags of the seen articles.
+3. Return up to 10 unseen articles that share a tag with that set, newest first (`strategy: "personalized"`).
+4. If there are none (for example a brand-new user with no interests), return the 10 newest unseen articles (`strategy: "fallback_recent"`).
+
+**AI helpers.**
+- *Summary* ([generateSummary.ts](src/utils/generateSummary.ts)): asks Gemini for a 2 to 3 sentence summary. Fallback: the first 50 words of the content followed by `...`.
+- *Tags* ([generateTags.ts](src/utils/generateTags.ts)): asks Gemini for 3 to 6 tags, then lowercases them and removes odd characters and duplicates. Fallback: the most frequent words (longer than 3 letters, not common stopwords) from the title and content, up to 6.
+
+---
+
+## 5. Project structure
+
+```
+backend/
 ├── src/
-│   ├── app.ts                    # Express app setup, route mounting, startup (DB connect then listen)
+│   ├── app.ts                       # Starts everything: middleware, routes, Swagger, DB connect, listen
 │   ├── config/
-│   │   ├── db.ts                 # connectDB(): Mongoose connection, exits process on failure
-│   │   └── swagger.ts            # OpenAPI definition + component schemas; scans routes/*.ts for @openapi JSDoc
+│   │   ├── db.ts                    # connectDB(): connects to MongoDB, exits the process on failure
+│   │   └── swagger.ts               # OpenAPI definition; reads @openapi comments from routes/*.ts
 │   ├── controllers/
-│   │   ├── articles.controller.ts      # create, list, search, trending, get by id, stats
-│   │   ├── interactions.controller.ts  # create interaction
-│   │   └── users.controller.ts         # create, get, activity, recommendations
+│   │   ├── auth.controller.ts       # register, login, current user
+│   │   ├── articles.controller.ts   # create, list, search, trending, get by id, stats
+│   │   ├── users.controller.ts      # own profile, activity, recommendations
+│   │   └── interactions.controller.ts  # record an interaction
 │   ├── middleware/
-│   │   └── errorHandler.ts      # AppError class, notFound (404) handler, central errorHandler
+│   │   ├── auth.ts                  # requireAuth (checks the Bearer token), getAuthenticatedUser
+│   │   └── errorHandler.ts          # AppError class, 404 handler, central error handler
 │   ├── models/
-│   │   ├── Article.ts            # Article schema (+ text index)
-│   │   ├── Interaction.ts        # Interaction schema
-│   │   └── User.ts               # User schema
+│   │   ├── User.ts                  # User schema
+│   │   ├── Article.ts               # Article schema (+ text index)
+│   │   └── Interaction.ts           # Interaction schema
 │   ├── routes/
-│   │   ├── articles.route.ts     # /articles routes + Swagger annotations
-│   │   ├── interactions.route.ts # /interactions routes + Swagger annotations
-│   │   └── users.route.ts        # /users routes + Swagger annotations
+│   │   ├── auth.route.ts            # /auth/*
+│   │   ├── articles.route.ts        # /articles/*
+│   │   ├── users.route.ts           # /users/*
+│   │   └── interactions.route.ts    # /interactions
+│   ├── validators/
+│   │   ├── auth.validator.ts        # Joi: register, login
+│   │   ├── articles.validator.ts    # Joi: create, list, search, trending
+│   │   ├── interactions.validator.ts # Joi: create interaction
+│   │   └── users.validator.ts       # Joi: list query (defined but not used)
 │   ├── utils/
-│   │   ├── asyncHandler.ts       # Forwards async errors to the error handler
-│   │   ├── generateSummary.ts    # Gemini summary with truncation fallback
-│   │   ├── generateTags.ts       # Gemini tags with keyword-frequency fallback
-│   │   └── paginator.ts          # buildPaginationResponse() -> { data, meta }
-│   └── validators/
-│       ├── articles.validator.ts      # Joi schemas: create, list query, search query, trending query
-│       ├── interactions.validator.ts  # Joi schema: create interaction
-│       └── users.validator.ts         # Joi schemas: create user, list query (unused)
-├── .env.example
-├── .gitignore                    # node_modules, .env, .DS_Store
-├── package.json
-├── package-lock.json
-├── tsconfig.json
+│   │   ├── token.ts                 # Create and read JWTs; checks JWT_SECRET at startup
+│   │   ├── asyncHandler.ts          # Passes errors from async controllers to the error handler
+│   │   ├── generateSummary.ts       # Gemini summary with fallback
+│   │   ├── generateTags.ts          # Gemini tags with fallback
+│   │   └── paginator.ts             # Builds the { data, meta } list response
+│   ├── seed/
+│   │   ├── seed.ts                  # Demo data script (npm run seed)
+│   │   └── seedData.ts              # The sample users and articles
+│   └── migrations/
+│       └── migrateLegacyUsers.ts    # One-time script for databases from before email/password sign-in
+├── dist/                            # Compiled JavaScript from `npm run build` (committed to Git)
+├── .env.example                     # Template for your .env file
+├── package.json                     # Dependencies and scripts
+├── tsconfig.json                    # TypeScript settings (src/ -> dist/)
 └── README.md
 ```
 
 ---
 
-## 5. Data Models
+## 6. Getting started
 
-All models use Mongoose `timestamps: true`, so each document also has `createdAt` and `updatedAt` (set automatically), plus the MongoDB `_id` and `__v`.
+### Prerequisites
 
-### Article (collection `articles`)
+- **Node.js** and **npm**. The project does not pin a Node version (there is no `engines` field). Use a current LTS release.
+- A **MongoDB** database: local, or a free MongoDB Atlas cluster.
+- Optional: a **Google Gemini API key** for AI summaries and tags.
 
-| Field | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `title` | String | Yes | none | Trimmed. |
-| `content` | String | Yes | none | |
-| `author` | String | Yes | none | Free text, not a reference to User. |
-| `summary` | String | No | `""` | Auto-generated by the API if omitted on create. |
-| `tags` | [String] | No | `[]` | Indexed. Auto-generated by the API if omitted/empty on create. |
+### Install
 
-Indexes: single-field index on `tags`; text index on `title`, `content`, `tags` (powers `/articles/search`).
+```bash
+git clone https://github.com/Alexander-OE/articulink.git
+cd articulink/backend
+npm install
+cp .env.example .env     # then open .env and fill in the values (see section 7)
+```
 
-### User (collection `users`)
+> The repo's `backend` folder is the project root. Run all commands from inside it.
 
-| Field | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `username` | String | Yes | none | Trimmed, **unique**. |
-| `interests` | [String] | No | `[]` | Used by recommendations; matched against article tags. |
+### Scripts
 
-### Interaction (collection `interactions`)
+| Command | What it does |
+| --- | --- |
+| `npm run dev` | Development server. Runs the TypeScript directly with `ts-node` and reloads when files in `src/` change. |
+| `npm run build` | Compiles `src/` to JavaScript in `dist/` (`tsc`). |
+| `npm start` | Production server. Runs the compiled `dist/app.js`. Run `npm run build` first. |
+| `npm run seed` | Fills the database with demo users, articles and interactions (see [Seed script](#seed-script)). |
+| `npm run migrate:users` | One-time migration for old databases (see [Migration script](#migration-script)). |
+| `npm test` | Placeholder only. There are no tests, and it exits with an error. |
 
-| Field | Type | Required | Default | Notes |
-| --- | --- | --- | --- | --- |
-| `userId` | ObjectId (ref `User`) | Yes | none | |
-| `articleId` | ObjectId (ref `Article`) | Yes | none | |
-| `interactionType` | String enum `view` / `like` / `share` | Yes | none | |
+### Run it
 
-No uniqueness constraint: the same user can create unlimited identical interactions.
+**Development**
+```bash
+npm run dev
+```
 
-### Relationships
+**Production**
+```bash
+npm run build
+npm start
+```
 
-- A **User** has many **Interactions**; an **Article** has many **Interactions**. `Interaction` is the join between them (`userId` -> User, `articleId` -> Article).
-- `Article.author` is a plain string, not linked to a User.
-- User interests and Article tags are both free-text strings; recommendations match them by exact string equality.
-- There are no cascading deletes (no delete endpoints exist).
+When it starts you should see `MongoDB connected` and `Server running on port ...`. The server uses `PORT` from `.env`, or **4000** if `PORT` is empty.
+
+Quick check:
+```bash
+curl http://localhost:4000/health
+```
+
+Interactive docs: <http://localhost:4000/docs>
 
 ---
 
-## 6. API Reference
+## 7. Environment variables
 
-Base URL (dev): `http://localhost:<PORT>` (default 4000 if `PORT` unset). No version prefix. All request/response bodies are JSON. No endpoint requires authentication.
+Copy `.env.example` to `.env` and fill it in. Never commit `.env` (it is in `.gitignore`).
 
-Pagination query parameters `limit` / `offset` are validated by Joi; invalid values give a 400. Unknown query parameters are stripped (ignored).
+| Variable | Required | What it does | Example placeholder |
+| --- | --- | --- | --- |
+| `PORT` | No | Port the server listens on. Defaults to `4000` if empty. Hosting platforms usually set it for you. | `4000` |
+| `MONGO_URI` | **Yes** | MongoDB connection string. If it is missing or wrong, the server logs an error and exits. | `mongodb://localhost:27017/articulink` |
+| `JWT_SECRET` | **Yes** | Secret key used to sign login tokens. The server refuses to start without it. Use a long random string. | `replace-with-a-long-random-string` |
+| `JWT_EXPIRES_IN` | No | How long a token stays valid (for example `7d` or `12h`). Defaults to `7d`. | `7d` |
+| `GEMINI_API_KEY` | No | Turns on AI summaries and tags. Without it, the built-in fallbacks are used. | `your-gemini-api-key` |
 
-### Summary
+To make a good `JWT_SECRET`:
+```bash
+node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
+```
 
-| Method | Path | Description |
-| --- | --- | --- |
-| GET | `/` | Service banner |
-| GET | `/health` | Liveness probe |
-| GET | `/docs` | Swagger UI |
-| GET | `/docs.json` | Raw OpenAPI spec |
-| POST | `/articles` | Create article |
-| GET | `/articles` | List articles (paginated, `tag` filter) |
-| GET | `/articles/search` | Full-text search |
-| GET | `/articles/trending` | Trending articles |
-| GET | `/articles/:id` | Get article |
-| GET | `/articles/:id/stats` | Engagement stats |
-| POST | `/users` | Create user |
-| GET | `/users/:id` | Get user |
-| GET | `/users/:id/activity` | Recent interactions |
-| GET | `/users/:id/recommendations` | Recommendations |
-| POST | `/interactions` | Record interaction |
+One more variable is read by the code but is not in `.env.example`: `NODE_ENV`. The seed script refuses to run when `NODE_ENV` is `production`.
+
+---
+
+## 8. Authentication
+
+Articulink uses **email + password** sign-in and **JWT bearer tokens**.
+
+**Registering.** `POST /auth/register` takes `fullName`, `email`, `password` (and optional `interests`). The password is hashed with bcrypt (10 rounds) and only the hash is saved. The email is saved in lowercase and must be unique. The response contains a token and the user.
+
+**Logging in.** `POST /auth/login` checks the email and password and returns a token and the user. A wrong email and a wrong password give the **same** error (`invalid_credentials`), so an attacker cannot tell which emails have accounts.
+
+**The token.**
+- It is a JWT signed with `JWT_SECRET`. It carries only the user's id.
+- It expires after `JWT_EXPIRES_IN` (default 7 days).
+- The client sends it on protected requests:
+  ```
+  Authorization: Bearer <token>
+  ```
+- On every protected request the server verifies the token and loads the user from the database. If the user no longer exists, the token is rejected.
+- Forged, malformed and expired tokens all return the same `invalid_token` error.
+
+**Which endpoints need a token?**
+
+| Access | Endpoints |
+| --- | --- |
+| **Public** | `GET /`, `GET /health`, `GET /docs`, `GET /docs.json`, `POST /auth/register`, `POST /auth/login`, `GET /articles`, `GET /articles/search`, `GET /articles/trending`, `GET /articles/:id`, `GET /articles/:id/stats` |
+| **Token required** | `GET /auth/me`, `POST /articles`, `POST /interactions` |
+| **Token required, own data only** | `GET /users/:id`, `GET /users/:id/activity`, `GET /users/:id/recommendations`. The `:id` must be the signed-in user's own id, otherwise `403 forbidden`. |
+
+The passwordHash is never returned in any response.
+
+---
+
+## 9. Data models
+
+All models use Mongoose `timestamps`, so every document also has `createdAt` and `updatedAt` (set automatically), plus `_id` and `__v` (added by MongoDB/Mongoose).
+
+### User (collection `users`)
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `fullName` | String | Yes | Trimmed. 2 to 100 characters. |
+| `email` | String | Yes | Trimmed, saved in lowercase, **unique**. |
+| `passwordHash` | String | Yes | bcrypt hash. Hidden from queries by default and removed from all JSON responses. |
+| `interests` | [String] | No (default `[]`) | Topics the user likes. Used for recommendations. |
+
+### Article (collection `articles`)
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `title` | String | Yes | Trimmed. The API limits it to 500 characters. |
+| `content` | String | Yes | The article body. |
+| `author` | String | Yes | A **copy** of the creator's full name at creation time. It is plain text, not a link to the User. |
+| `summary` | String | No (default `""`) | Generated by the API if left out. |
+| `tags` | [String] | No (default `[]`) | Generated by the API if left out or empty. |
+
+Indexes: one on `tags`, and a **text index** on `title`, `content` and `tags` (used by search).
+
+### Interaction (collection `interactions`)
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `userId` | ObjectId (ref `User`) | Yes | Who did it. Always the signed-in user. |
+| `articleId` | ObjectId (ref `Article`) | Yes | Which article. |
+| `interactionType` | String: `view`, `like` or `share` | Yes | The kind of engagement. |
+
+There is no uniqueness rule: the same user can create the same interaction many times.
+
+### How they relate
+
+```
+User 1 ──── * Interaction * ──── 1 Article
+```
+
+- `Interaction` links a user to an article. One user has many interactions, and one article has many interactions.
+- `Article.author` is just a name string, not a reference.
+- A user's `interests` and an article's `tags` are both free text. Recommendations compare them by **exact** text match.
+
+---
+
+## 10. API reference
+
+- **Base URL (local):** `http://localhost:4000` (or your `PORT`). On Render, use your service URL.
+- There is no version prefix. Requests and responses are JSON (`Content-Type: application/json`).
+- In the examples, `$TOKEN` means the token returned by register or login.
+
+### Endpoint summary
+
+| Method | Path | Auth | Description |
+| --- | --- | --- | --- |
+| GET | `/` | Public | Service banner |
+| GET | `/health` | Public | Health check |
+| GET | `/docs` | Public | Swagger UI |
+| GET | `/docs.json` | Public | Raw OpenAPI spec |
+| POST | `/auth/register` | Public | Create an account |
+| POST | `/auth/login` | Public | Sign in |
+| GET | `/auth/me` | Token | Current user |
+| POST | `/articles` | Token | Create an article |
+| GET | `/articles` | Public | List articles |
+| GET | `/articles/search` | Public | Full-text search |
+| GET | `/articles/trending` | Public | Trending articles |
+| GET | `/articles/:id` | Public | Get one article |
+| GET | `/articles/:id/stats` | Public | Engagement counts |
+| GET | `/users/:id` | Token (own) | Get your user |
+| GET | `/users/:id/activity` | Token (own) | Your recent interactions |
+| GET | `/users/:id/recommendations` | Token (own) | Your recommendations |
+| POST | `/interactions` | Token | Record a view, like or share |
+
+Validation rules in the tables below are enforced by Joi. On `POST` bodies, **unknown fields are rejected** with a 400. On query strings, unknown parameters are ignored.
 
 ### System
 
 #### `GET /`
-Response `200`: `{ "name": "Articulink", "status": "ok" }`
+```json
+{ "name": "Articulink", "status": "ok" }
+```
 
 #### `GET /health`
-Response `200`:
 ```json
 { "status": "ok", "uptime": 123.45, "timestamp": 1760000000000 }
 ```
-`uptime` is seconds (`process.uptime()`); `timestamp` is epoch milliseconds. It does not check the database.
+`uptime` is in seconds. `timestamp` is epoch milliseconds. It does **not** check the database.
 
 #### `GET /docs` and `GET /docs.json`
-Swagger UI (HTML) and the OpenAPI 3.0.3 document (JSON). See [section 10](#10-api-documentation-swagger).
+The Swagger UI page and the raw OpenAPI 3.0.3 JSON. In the UI, click **Authorize** and paste the token (without the word "Bearer") to try protected endpoints.
 
-### Articles
+### Auth
 
-#### `POST /articles`
-
-Body:
+#### `POST /auth/register`
 
 | Field | Type | Required | Rules |
 | --- | --- | --- | --- |
-| `title` | string | Yes | max 500 chars, non-empty |
-| `content` | string | Yes | non-empty |
-| `author` | string | Yes | max 200 chars, non-empty |
-| `summary` | string / null / `""` | No | If missing, null or blank, generated |
-| `tags` | string[] | No | If missing or empty, generated |
+| `fullName` | string | Yes | 2 to 100 characters (trimmed) |
+| `email` | string | Yes | Valid email, max 254 characters. Stored in lowercase. |
+| `password` | string | Yes | 6 to 72 characters |
+| `interests` | string[] | No | List of non-empty strings |
 
-Unknown body fields are rejected (Joi default), returning 400.
+```bash
+curl -X POST http://localhost:4000/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"fullName":"Ada Lovelace","email":"ada@example.com","password":"correct-horse-battery","interests":["technology","ai"]}'
+```
+Response `201`:
+```json
+{
+  "token": "eyJhbGciOi...",
+  "user": {
+    "_id": "6abf9f1993a9d71c5e5de0b7",
+    "fullName": "Ada Lovelace",
+    "email": "ada@example.com",
+    "interests": ["technology", "ai"],
+    "createdAt": "2026-01-01T10:00:00.000Z",
+    "updatedAt": "2026-01-01T10:00:00.000Z",
+    "__v": 0
+  }
+}
+```
+Errors: `400` validation (array of messages), `409 email_already_registered`.
 
-Example request:
+#### `POST /auth/login`
+
+| Field | Type | Required | Rules |
+| --- | --- | --- | --- |
+| `email` | string | Yes | Trimmed and lowercased before the lookup |
+| `password` | string | Yes | |
+
+```bash
+curl -X POST http://localhost:4000/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"ada@example.com","password":"correct-horse-battery"}'
+```
+Response `200`: same shape as register (`{ token, user }`).
+Errors: `400` (a field is missing), `401 invalid_credentials`.
+
+#### `GET /auth/me`  (token)
+Returns the signed-in user (same object as `user` above).
+```bash
+curl http://localhost:4000/auth/me -H "Authorization: Bearer $TOKEN"
+```
+Errors: `401 missing_token` or `401 invalid_token`.
+
+### Articles
+
+#### `POST /articles`  (token)
+
+| Field | Type | Required | Rules |
+| --- | --- | --- | --- |
+| `title` | string | Yes | Not empty, max 500 characters |
+| `content` | string | Yes | Not empty |
+| `summary` | string / null | No | If missing, null or blank, it is generated |
+| `tags` | string[] | No | If missing or empty, they are generated |
+
+Do **not** send `author`. It is set from your account, and sending it gives a 400.
+
 ```bash
 curl -X POST http://localhost:4000/articles \
-  -H "Content-Type: application/json" \
-  -d '{"title":"The Rise of AI in Modern Software","content":"Artificial intelligence is transforming software...","author":"Jane Doe"}'
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"The Rise of AI in Modern Software","content":"Artificial intelligence is transforming software..."}'
 ```
-Response `201` (the created document):
+Response `201` (the saved article):
 ```json
 {
   "_id": "6abf9efe93a9d71c5e5de0b5",
   "title": "The Rise of AI in Modern Software",
   "content": "Artificial intelligence is transforming software...",
-  "author": "Jane Doe",
+  "author": "Ada Lovelace",
   "summary": "AI is reshaping how software is built...",
   "tags": ["software", "artificial intelligence"],
   "createdAt": "2026-01-01T10:00:00.000Z",
@@ -262,41 +467,47 @@ Response `201` (the created document):
   "__v": 0
 }
 ```
-Errors: `400` with `{ "error": ["\"title\" is required", ...] }` (array of messages, all errors reported).
+Errors: `400` validation (array), `401`.
 
 #### `GET /articles`
 
 | Query | Type | Default | Rules |
 | --- | --- | --- | --- |
-| `limit` | integer | 10 | 1-100 |
-| `offset` | integer | 0 | >= 0 |
-| `tag` | string | none | Exact, case-sensitive match against `tags` |
+| `limit` | integer | 10 | 1 to 100 |
+| `offset` | integer | 0 | 0 or more |
+| `tag` | string | none | Exact, case-sensitive match against an article's tags |
 
-Sorted newest first (`createdAt` desc). Response `200`:
+Newest first. Example: `GET /articles?limit=5&offset=0&tag=ai`
+
+Response `200`:
 ```json
 {
-  "data": [ { "_id": "...", "title": "...", "tags": ["..."], "...": "..." } ],
-  "meta": { "total": 42, "limit": 10, "offset": 0 }
+  "data": [ { "_id": "...", "title": "...", "tags": ["ai"], "author": "...", "...": "..." } ],
+  "meta": { "total": 42, "limit": 5, "offset": 0 }
 }
 ```
-Errors: `400` (array of messages).
+Errors: `400`.
 
-#### `GET /articles/search?q=`
+#### `GET /articles/search`
 
 | Query | Type | Default | Rules |
 | --- | --- | --- | --- |
-| `q` | string | required | 1-200 chars |
-| `limit` | integer | 10 | 1-100 |
-| `offset` | integer | 0 | >= 0 |
+| `q` | string | required | 1 to 200 characters |
+| `limit` | integer | 10 | 1 to 100 |
+| `offset` | integer | 0 | 0 or more |
 
-Uses MongoDB `$text` search, sorted by text relevance. Each returned article has an extra `score` field (the text score). Response shape is the same `{ data, meta }` as the list. Errors: `400`.
+Example: `GET /articles/search?q=artificial%20intelligence`
+
+Uses MongoDB text search, ordered by relevance. Same `{ data, meta }` response as the list. Each result is also expected to carry a `score` (the relevance value). Errors: `400`.
 
 #### `GET /articles/trending`
 
 | Query | Type | Default | Rules |
 | --- | --- | --- | --- |
-| `days` | integer | 7 | 1-365 |
-| `limit` | integer | 10 | 1-50 |
+| `days` | integer | 7 | 1 to 365 |
+| `limit` | integer | 10 | 1 to 50 |
+
+Only counts interactions from the last `days` days. Score = shares × 5 + likes × 3 + views × 1. Only articles with at least one interaction in that window appear. Not paginated.
 
 Response `200`:
 ```json
@@ -307,175 +518,210 @@ Response `200`:
   "meta": { "days": 7, "limit": 10 }
 }
 ```
-Note: `meta` has no `total`/`offset`; this endpoint is not paginated. Only articles with at least one interaction in the window appear. Errors: `400`.
+Errors: `400`.
 
 #### `GET /articles/:id`
-Returns the article document (same shape as in `POST /articles`). Errors: `400 {"error":"invalid_id"}`, `404 {"error":"not_found"}`.
+Returns the article (same shape as the create response). Errors: `400 invalid_id`, `404 not_found`.
 
 #### `GET /articles/:id/stats`
-Response `200`:
+All-time counts for the article.
 ```json
 { "articleId": "6abf9efe93a9d71c5e5de0b5", "stats": { "views": 12, "likes": 4, "shares": 1, "total": 17 } }
 ```
-Errors: `400 invalid_id`, `404 not_found`. Counts are all-time.
+Errors: `400 invalid_id`, `404 not_found`.
 
 ### Users
 
-#### `POST /users`
-
-| Field | Type | Required | Rules |
-| --- | --- | --- | --- |
-| `username` | string | Yes | alphanumeric only, 3-30 chars, unique |
-| `interests` | string[] | No | |
-
-Example:
-```bash
-curl -X POST http://localhost:4000/users -H "Content-Type: application/json" \
-  -d '{"username":"reader42","interests":["technology","ai"]}'
-```
-Response `201`:
-```json
-{ "_id": "6abf9f1993a9d71c5e5de0b7", "username": "reader42", "interests": ["technology","ai"],
-  "createdAt": "...", "updatedAt": "...", "__v": 0 }
-```
-Errors: `400` validation (array of messages); `400 {"error":"username_already_exists"}` on duplicate (note: 400, not 409).
+All three routes need a token, and `:id` must be **your own** user id (you can get it from `user._id`). Check order: token first (`401`), then a valid id (`400 invalid_id`), then ownership (`403 forbidden`).
 
 #### `GET /users/:id`
-Returns the user document. Errors: `400 invalid_id`, `404 not_found`.
+Returns your user object.
+```bash
+curl http://localhost:4000/users/6abf9f1993a9d71c5e5de0b7 -H "Authorization: Bearer $TOKEN"
+```
 
 #### `GET /users/:id/activity`
-Returns up to the **50** most recent interactions (newest first), with `articleId` populated to `{ _id, title, author, tags }`. Not paginated.
+Your 50 most recent interactions, newest first, with the article's `title`, `author` and `tags` filled in. Not paginated.
 ```json
 {
   "userId": "6abf9f1993a9d71c5e5de0b7",
   "interactions": [
-    { "_id": "...", "userId": "...", "articleId": { "_id": "...", "title": "...", "author": "...", "tags": ["..."] },
-      "interactionType": "like", "createdAt": "...", "updatedAt": "...", "__v": 0 }
+    {
+      "_id": "...",
+      "userId": "6abf9f1993a9d71c5e5de0b7",
+      "articleId": { "_id": "...", "title": "...", "author": "...", "tags": ["ai"] },
+      "interactionType": "like",
+      "createdAt": "...", "updatedAt": "...", "__v": 0
+    }
   ]
 }
 ```
-If an article was deleted from the database, the populated `articleId` would be `null` (no delete endpoint exists today). Errors: `400 invalid_id`, `404 not_found`.
 
 #### `GET /users/:id/recommendations`
-No query parameters; result size is fixed at 10.
+No query parameters. Returns up to 10 articles (see [How it works](#4-how-it-works)).
 ```json
 {
   "userId": "6abf9f1993a9d71c5e5de0b7",
   "strategy": "personalized",
   "matchedInterests": ["technology", "ai", "software"],
-  "data": [ { "_id": "...", "title": "...", "tags": ["..."] } ]
+  "data": [ { "_id": "...", "title": "...", "tags": ["ai", "software"] } ]
 }
 ```
-`strategy` is `"personalized"` or `"fallback_recent"`. See [section 9](#9-utilities-and-special-logic). Errors: `400 invalid_id`, `404 not_found`.
+`strategy` is `"personalized"` or `"fallback_recent"`. `matchedInterests` is the tag set that was used.
 
 ### Interactions
 
-#### `POST /interactions`
+#### `POST /interactions`  (token)
 
-Note the **snake_case** body fields (the stored/returned fields are camelCase).
+Note the **snake_case** field names in this body. The user comes from the token, so there is no `user_id`.
 
 | Field | Type | Required | Rules |
 | --- | --- | --- | --- |
-| `user_id` | string | Yes | Valid ObjectId; user must exist |
-| `article_id` | string | Yes | Valid ObjectId; article must exist |
+| `article_id` | string | Yes | A valid ObjectId of an existing article |
 | `interaction_type` | string | Yes | `view`, `like` or `share` |
 
-Example:
 ```bash
-curl -X POST http://localhost:4000/interactions -H "Content-Type: application/json" \
-  -d '{"user_id":"6abf9f1993a9d71c5e5de0b7","article_id":"6abf9efe93a9d71c5e5de0b5","interaction_type":"like"}'
+curl -X POST http://localhost:4000/interactions \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"article_id":"6abf9efe93a9d71c5e5de0b5","interaction_type":"like"}'
 ```
-Response `201`:
+Response `201` (stored fields are camelCase):
 ```json
-{ "_id": "...", "userId": "6abf9f1993a9d71c5e5de0b7", "articleId": "6abf9efe93a9d71c5e5de0b5",
-  "interactionType": "like", "createdAt": "...", "updatedAt": "...", "__v": 0 }
+{
+  "_id": "...",
+  "userId": "6abf9f1993a9d71c5e5de0b7",
+  "articleId": "6abf9efe93a9d71c5e5de0b5",
+  "interactionType": "like",
+  "createdAt": "...", "updatedAt": "...", "__v": 0
+}
 ```
-Errors: `400` validation (array); `400 invalid_id`; `404 user_not_found`; `404 article_not_found`.
+Errors: `400` validation (array), `400 invalid_id`, `401`, `404 article_not_found`.
+
+### Seed script
+
+Not an HTTP endpoint. It is a command-line script that fills the database with demo content.
+
+```bash
+npm run seed
+```
+
+- Creates **9 users**, **32 articles** and a spread of views, likes and shares over roughly the last 16 days. This gives the trending and recommendation endpoints something to show.
+- All seeded users share one demo password. It is the `demoPassword` value in [src/seed/seedData.ts](src/seed/seedData.ts), and the script prints two demo accounts when it finishes. Seeded emails look like `amara.okafor@example.com`.
+- Safe to run again: it first deletes only the data it created earlier (matched by the seed emails and article titles), then recreates it. Other data is left alone.
+- It **refuses to run if `NODE_ENV=production`**.
+- It writes to whatever database `MONGO_URI` points to, so check that value first.
+- If your database has users from before email/password sign-in, run the migration first.
+
+### Migration script
+
+```bash
+npm run migrate:users
+```
+
+A one-time script for old databases whose users only had a `username`. It copies `username` into `fullName`, gives each user a placeholder `...@articulink.invalid` email and an unknown random password (so those accounts cannot be signed in to), removes `username` and its old index, and syncs the User indexes. Safe to run twice. A fresh database does not need it.
 
 ---
 
-## 7. Authentication and Authorization
+## 11. Error handling
 
-**None exists.** There are no login endpoints, tokens, sessions, API keys or auth middleware. Every endpoint is public. Users are identified only by the `_id` the client passes in the URL (`/users/:id/...`) or body (`user_id`), and nothing verifies that the caller is that user.
+Every error response is JSON with an `error` key. Code: [src/middleware/errorHandler.ts](src/middleware/errorHandler.ts).
 
-The only global middleware is `express.json()`, `helmet()` and `morgan("dev")` (plus the error handlers).
+```json
+{ "error": "not_found" }
+```
 
----
+Validation errors are different: `error` is an **array** of messages, and all problems are listed at once.
 
-## 8. Error Handling
+```json
+{ "error": ["\"title\" is required", "\"content\" is required"] }
+```
 
-Implemented in [src/middleware/errorHandler.ts](src/middleware/errorHandler.ts) and [src/utils/asyncHandler.ts](src/utils/asyncHandler.ts).
-
-**Format:** always `{ "error": ... }`.
-
-| Situation | Status | Body |
+| Status | `error` value | When |
 | --- | --- | --- |
-| Joi validation failure | 400 | `{ "error": ["message", ...] }` (**array** of strings) |
-| Invalid ObjectId | 400 | `{ "error": "invalid_id" }` |
-| Duplicate username | 400 | `{ "error": "username_already_exists" }` |
-| Article/user not found | 404 | `{ "error": "not_found" }` |
-| Interaction with unknown user / article | 404 | `{ "error": "user_not_found" }` / `{ "error": "article_not_found" }` |
-| Unmatched route | 404 | `{ "error": "route_not_found", "path": "/original/url" }` |
-| Unexpected error | 500 | `{ "error": "internal_server_error" }` (details logged server-side only) |
+| 400 | array of messages | A Joi validation rule failed |
+| 400 | `invalid_id` | An id is not a valid MongoDB ObjectId |
+| 400 | message from Express | The request body is not valid JSON |
+| 401 | `missing_token` | No `Authorization: Bearer ...` header |
+| 401 | `invalid_token` | Token is forged, malformed, expired, or its user no longer exists |
+| 401 | `invalid_credentials` | Wrong email or password |
+| 403 | `forbidden` | Using `/users/:id` with an id that is not yours |
+| 404 | `not_found` | Article not found |
+| 404 | `article_not_found` | `POST /interactions` with an unknown article |
+| 404 | `route_not_found` | No such route (the body also has a `path` field) |
+| 409 | `email_already_registered` | Registering an email that is already used |
+| 500 | `internal_server_error` | Anything unexpected (details are logged on the server only) |
 
-How it works: controllers throw `AppError(message, status)`; `asyncHandler` forwards rejected promises to `errorHandler`, which returns `err.message` for any status < 500 and the generic message for 5xx. Errors from Express itself that carry a `status` (for example malformed JSON bodies from `express.json()`) also pass through with their own status and message. **Validation errors return an array while all other errors return a string**, so a client should handle both.
+Controllers throw `AppError(message, status)`. `asyncHandler` passes any failed async code to the central handler. For status codes below 500 the handler returns the error's own message. For 500 and above it returns the generic message.
 
----
-
-## 9. Utilities and Special Logic
-
-- **Summary generation** ([generateSummary.ts](src/utils/generateSummary.ts)): if `GEMINI_API_KEY` is set, asks `gemini-1.5-flash` for a 2-3 sentence summary. Otherwise (or on any error, which is logged) returns the first 50 whitespace-separated words of the content followed by `...`.
-- **Tag generation** ([generateTags.ts](src/utils/generateTags.ts)): asks Gemini for 3-6 comma-separated tags. Output is lowercased, stripped of everything except letters, digits, spaces and hyphens, de-duplicated, and capped at 6. Fallback (no key, error, or empty result): take title + content, keep words longer than 3 characters that are not in a small stopword list, rank by frequency, and use the top 6.
-- **Summary/tags on create**: both are only generated when missing (blank summary / empty tags), and run in parallel. Client-supplied tags are stored as-is (not normalised).
-- **Pagination** ([paginator.ts](src/utils/paginator.ts)): offset-based. `buildPaginationResponse(data, total, limit, offset)` returns `{ data, meta: { total, limit, offset } }`. Used by `GET /articles` and `GET /articles/search`. There is no "next page" link or page count; compute from `total`, `limit`, `offset`.
-- **Async handler** ([asyncHandler.ts](src/utils/asyncHandler.ts)): wraps async controllers so rejected promises reach the error middleware (Express 5 does this natively for async handlers, so it is a belt-and-braces measure).
-- **Trending score**: within the last `days` days, `score = shares*5 + likes*3 + views*1` per article; sorted by score descending, limited by `limit`.
-- **Recommendations**: (1) collect the articles the user has interacted with (any type) as "seen"; (2) build a tag set from the user's `interests` plus the tags of seen articles; (3) return up to 10 unseen articles whose tags overlap the set, newest first (`strategy: "personalized"`); (4) if none, return the 10 newest unseen articles (`strategy: "fallback_recent"`). `matchedInterests` is the tag set used.
+Clients should handle both shapes: an array for validation errors, a string for everything else.
 
 ---
 
-## 10. API Documentation (Swagger)
+## 12. Deployment
 
-- **Swagger UI:** `http://localhost:<PORT>/docs` (page title "Articulink API Docs")
-- **Raw OpenAPI 3.0.3 spec:** `http://localhost:<PORT>/docs.json`
+The backend is deployed on **Render** (a hosting platform) with **MongoDB Atlas** (a hosted MongoDB database).
 
-The spec is built by `swagger-jsdoc` from the component schemas in [src/config/swagger.ts](src/config/swagger.ts) plus `@openapi` JSDoc comments in `src/routes/*.ts`. The raw spec is handy for generating a typed frontend client. `/docs` is mounted before `helmet` so the UI's assets aren't blocked by the default CSP.
+> This repo has no Render config file (such as `render.yaml`), so the settings below are the standard ones for this project's scripts. Check them against your Render dashboard.
+
+**1. Database (Atlas)**
+1. Create a cluster and a database user.
+2. Under *Network Access*, allow connections from Render (many people allow `0.0.0.0/0` on small projects).
+3. Copy the connection string. It becomes `MONGO_URI`.
+
+**2. Web service (Render)**
+1. Create a **Web Service** from the GitHub repo. If the repo root is not this folder, set the root directory to `backend`.
+2. Settings:
+
+| Setting | Value |
+| --- | --- |
+| Build command | `npm install && npm run build` |
+| Start command | `npm start` |
+
+3. Add these environment variables in the Render dashboard: `MONGO_URI`, `JWT_SECRET`, and (optional) `JWT_EXPIRES_IN`, `GEMINI_API_KEY`. Render supplies `PORT` itself. See [section 7](#7-environment-variables).
+4. Use the `/health` endpoint as the health check path.
+
+**Good to know**
+- On the **free tier**, the service goes to sleep after a period of inactivity (about 15 minutes). The next request can take up to a minute while it wakes up. The first request from the frontend may therefore look slow.
+- The seed script refuses to run when `NODE_ENV=production`.
+- See the Swagger and CORS notes in the next section before relying on the deployed docs or a browser frontend.
 
 ---
 
-## 11. Notes for Frontend Development
+## 13. Known limitations and ideas for improvement
 
-- **Base URL / port:** `http://localhost:<PORT>`, where `PORT` defaults to **4000** in code. The Swagger `servers` entry hard-codes `http://localhost:3000`, so "Try it out" in `/docs` only works if you run on port 3000 (set `PORT=3000`) or edit that entry.
-- **CORS: not configured.** No `cors` package or headers are present. A browser frontend on a different origin will be blocked until CORS is added to the backend (or you use a dev proxy, e.g. Vite/Next proxy to the API).
-- **Request format:** `Content-Type: application/json`. Interaction creation uses snake_case fields (`user_id`, `article_id`, `interaction_type`); everything else is camelCase.
-- **Response format:** documents are returned as raw Mongoose JSON: `_id` (string), `createdAt`, `updatedAt` (ISO dates) and `__v`. Lists are `{ data, meta }`; the single-resource endpoints return the document directly; recommendations/activity/trending/stats use their own wrapper objects (see section 6).
-- **Pagination:** `limit`/`offset` with `meta.total`. Trending, activity and recommendations are not paginated.
-- **Auth flow:** none. There is no login or session; the UI must create a user via `POST /users` and keep the returned `_id` (e.g. in local storage) to use in `/users/:id/...` and `user_id`. There is no "find user by username" or list-users endpoint, so a lost `_id` cannot be recovered through the API.
-- **Likely UI flows:** home feed `GET /articles` / `GET /articles/trending`; search `GET /articles/search?q=`; tag chips filter via `?tag=`; article page `GET /articles/:id` + `/stats`, then `POST /interactions` with `view` on open and `like`/`share` on actions; "For you" `GET /users/:id/recommendations`; history `GET /users/:id/activity`.
-- **Behaviours to design around:** creating an article can be slow when Gemini is used (it awaits the AI call); duplicate usernames return 400; interactions are not de-duplicated (a user can "like" repeatedly, and each counts); `tag` filtering is case-sensitive and exact; validation errors are arrays, other errors are strings.
-- **Security headers:** `helmet` defaults are applied to all routes except `/docs*`.
+These were noticed while reading the code. None of them were changed.
 
----
+**Security and access**
+1. **No CORS.** No CORS headers are set anywhere in the code. A browser app on a different origin will be blocked unless it goes through a proxy. It is unclear how the current frontend gets around this.
+2. **No password reset, change password, email verification, logout or token refresh.** A token stays valid until it expires.
+3. **No rate limiting**, so login can be tried repeatedly.
+4. **Anyone signed in can publish.** There are no roles, and articles cannot be edited or deleted.
 
-## 12. Known Gaps and Suggestions
+**Missing features**
+5. No endpoint to update a user's name or **interests**. Interests are only set at registration, yet recommendations depend on them.
+6. No update/delete for articles, no way to remove an interaction (for example "unlike"), and no endpoint to list a user's own articles.
+7. `GET /users/:id` is almost the same as `GET /auth/me`, because the id must be your own.
 
-Observed in the code (not fixed here):
+**Data and logic**
+8. **Interactions are not de-duplicated.** Repeated likes and views all count, and they inflate stats and trending.
+9. There are no indexes on `Interaction.userId` or `Interaction.articleId`, which may slow stats, trending and recommendations as data grows.
+10. `author` is a copy of the name at creation time. It will not follow later name changes (though no endpoint changes names today).
+11. Tag and interest matching is exact and case-sensitive. Tags you send yourself are not lowercased.
+12. Activity (50) and recommendations (10) have fixed sizes. Activity and trending are not paginated.
 
-1. **No CORS** configured (see above); required for a browser frontend.
-2. **No authentication/authorization**; any caller can act as any user.
-3. **No `build` / `start` scripts** and no `outDir` in `tsconfig.json`; production run is undefined. Also `swagger.ts` scans `routes/*.ts`, which would find nothing if the code were compiled to `.js` files without adjusting the glob.
-4. **Dev script relies on `--experimental-specifier-resolution=node`**, a flag removed in newer Node.js versions; the `node --loader ts-node/esm` setup may fail depending on your Node version. Not verified by running.
-5. **No tests** (`npm test` is a placeholder).
-6. **Port mismatch:** code default is 4000; Swagger server URL and the previous README used 3000.
-7. **Missing endpoints:** no update/delete for articles or users, no list-users or lookup-by-username, no interaction listing or removal ("unlike").
-8. **`listQuerySchema`** in `users.validator.ts` is defined but never used. `axios` is an unused dependency; several `@types/*` packages (`axios`, `helmet`, `joi`) are deprecated stubs as those libraries ship their own types.
-9. **Interactions aren't de-duplicated** (repeated likes/views inflate stats and trending), and there is no unique index or rate limiting.
-10. **Duplicate username returns 400**; 409 would be more conventional.
-11. **Inconsistent error shapes** (array vs string) and no machine-readable error codes for validation errors.
-12. **Swagger docs are incomplete in places**: for example `400 invalid_id` is documented on `/articles/{id}` but not on `/articles/{id}/stats` or the user routes; the `score` field returned by search is not in the `Article` schema.
-13. **Gemini model `gemini-1.5-flash` is hard-coded** and may be retired or deprecated by Google; consider making it a configurable env var. Gemini calls have no timeout.
-14. **Recommendations/activity sizes are fixed** (10 and 50) and not configurable; `tags`/interests matching is exact and case-sensitive (user interests and client-supplied tags are not normalised).
-15. **`MONGO_URI` falls back to an empty string** when unset, producing a generic connection error rather than a clear "missing variable" message.
-16. **`/health` does not check the database connection.**
-17. `generateSummary.ts` has a stale header comment (`src/services/summary.service.ts`); source files are inconsistently formatted/indented (the models and validators lack indentation).
-18. The `updatedAt` field is included in the Swagger `Interaction` schema, but the TypeScript `IInteraction` interface only declares `createdAt` (types only; both are stored).
+**AI**
+13. The model name `gemini-1.5-flash` is hard-coded and has no timeout. Google may have retired this model. If so, every call silently falls back to the simple summary and tags (only a log message shows it). Consider making the model a setting.
+
+**API docs (Swagger)**
+14. The Swagger server URL is hard-coded to `http://localhost:3000`, but the code default port is **4000**. "Try it out" will not reach the right server locally or on Render without editing it.
+15. `swagger.ts` reads `routes/*.ts`. In the compiled `dist/` build, the route files are `.js`, so the `@openapi` comments probably will not be found and `/docs` may show no endpoints in production. This comes from reading the code and was not tested on a running build.
+16. The `System` tag exists in Swagger, but `/` and `/health` have no Swagger annotations. Some responses (for example `400 invalid_id` on stats, and the `score` field on search) are not documented.
+
+**Project health**
+17. **No tests.** `npm test` is a placeholder.
+18. The dev, seed and migrate scripts use `--experimental-specifier-resolution=node`, an old Node flag that newer Node versions removed. They may fail on some Node versions. This was not verified by running them.
+19. `dist/` is committed to Git and not in `.gitignore`, so it can go out of date. Rebuild with `npm run build` before relying on it.
+20. Unused code and packages: `axios`, `listQuerySchema` in `users.validator.ts`, and the `@types/axios`, `@types/helmet` and `@types/joi` packages (these libraries ship their own types, so those stub packages are likely unnecessary).
+21. `/health` does not check the database. `MONGO_URI` falls back to an empty string when unset, which gives a generic connection error rather than a clear "missing variable" message.
+22. Error shapes are inconsistent (array vs string), and validation errors have no machine-readable code.
+23. Small tidy-ups: `generateSummary.ts` starts with a stale comment (`src/services/summary.service.ts`), and several files (models, validators, some routes) are formatted differently from the rest.
